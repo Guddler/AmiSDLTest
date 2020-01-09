@@ -60,9 +60,9 @@ ADD_EXECUTABLE(${TARGET} ${SOURCES})
 
 TARGET_LINK_LIBRARIES(${TARGET}
 	# Novacoder SDL
-	SDL_RTG_040
+	#SDL_RTG_040
 	# Amigaports SDL
-	#SDL
+	SDL
 	m
 	libdebug.a
 )

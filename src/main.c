@@ -7,6 +7,9 @@
 
 #include <SDL/SDL.h>
 
+#include <clib/icon_protos.h>
+#include <workbench/startup.h>
+
 #define SDL_LogError( CAT, STR, ...) \
 	printf(CAT STR "\n", ##__VA_ARGS__)
 
@@ -15,7 +18,9 @@
 void endTest(int);
 void doDraw();
 
-SDL_Surface *frameBuffer;
+SDL_Surface *buffer = NULL;
+SDL_Surface *screen = NULL;
+
 SDL_PixelFormat format;
 Uint32 startClock;
 Uint32 deltaClock;
@@ -25,34 +30,91 @@ int width = 320;
 int height = 240;
 
 int main(int argc, char **argv) {
+	struct WBStartup *wbStartup;
+	struct DiskObject *diskObject;
+
 	SDL_Event event;
-	SDL_Rect **sizes;
-	int flags = SDL_SWSURFACE | SDL_FULLSCREEN;
+	SDL_Rect **modes;
+	unsigned int flags = SDL_DOUBLEBUF;
 
 	int quit = 0;
+
+	char *toolType;
+
+	// Get our options
+	if (argc != 0) {
+		printf("You must start this program from the WB\n");
+		return EXIT_FAILURE;
+	}
+
+	// Setup command line
+	wbStartup = (struct WBStartup *)argv;
+
+	// Process ToolTypes
+	diskObject = GetDiskObject((unsigned char *)wbStartup->sm_ArgList[0].wa_Name);
+	if (diskObject != NULL) {
+		toolType = (char *) FindToolType(diskObject->do_ToolTypes, (unsigned char *) "HW_RENDER");
+		flags = (toolType == NULL) ? SDL_SWSURFACE : SDL_HWSURFACE;
+
+		toolType = (char *) FindToolType(diskObject->do_ToolTypes, (unsigned char *) "HIRES");
+		if (toolType != NULL) {
+			width = 640;
+			height = 480;
+		}
+
+		toolType = (char *) FindToolType(diskObject->do_ToolTypes, (unsigned char *) "FULLSCREEN");
+		if (toolType != NULL)
+			flags |= SDL_FULLSCREEN;
+
+		toolType = (char *)FindToolType(diskObject->do_ToolTypes, (unsigned char *)"BPP");
+		format.BitsPerPixel = (toolType == NULL) ? 8 : strtod(toolType, NULL);;
+
+		toolType = (char *) FindToolType(diskObject->do_ToolTypes, (unsigned char *) "CLOSE_WB");
+		if (toolType != NULL)
+			SDL_putenv("SDL_CLOSE_WB=1");
+
+		toolType = (char *) FindToolType(diskObject->do_ToolTypes, (unsigned char *) "DISPLAY_MODE");
+		if (toolType != NULL) {
+			if (strcmp(toolType, "NTSC") == 0)
+				SDL_putenv("SDL_DISPLAY_MODE=NTSC");
+			else if (strcmp(toolType, "PAL") == 0)
+				SDL_putenv("SDL_DISPLAY_MODE=PAL");
+		}
+
+		toolType = (char *) FindToolType(diskObject->do_ToolTypes, (unsigned char *) "RELATIVE_MOUSE");
+		if (toolType != NULL)
+			SDL_putenv("SDL_MOUSE_RELATIVE=1");
+
+	}
 
 	if (SDL_Init(SDL_INIT_VIDEO) < 0) {
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Couldn't initialize SDL: %s", SDL_GetError());
 		exit(-1);
 	}
 
-	format.BitsPerPixel = 8;
-	format.BytesPerPixel = 1;
-	sizes = SDL_ListModes(&format, flags);
+	// TODO : Is this right when BPP > 8 ??
+	format.BytesPerPixel = format.BitsPerPixel / 8;
+	modes = SDL_ListModes(&format, flags);
 
 	printf("Requested mode: %dx%d @ %dBpp %s\n",
 	       width, height, format.BitsPerPixel,
 	       (flags & SDL_FULLSCREEN) ? "FullScreen" : "Windowed");
 
 	int foundRes = 0;
-	if (sizes == NULL) {
+	if (modes == (SDL_Rect **)0) {
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "No sizes supported at this bit depth");
 		endTest(-1);
 	} else {
-		for (int i = 0; sizes[i]; i++) {
-			printf("Supported size w = %d h = %d\n", sizes[i]->w, sizes[i]->h);
-			if (sizes[i]->w == width && sizes[i]->h == height)
+		printf("Listing modes...\n");
+		for (int i = 0; modes[i]; ++i) {
+			printf("Supported size w = %d h = %d\n", modes[i]->w, modes[i]->h);
+			if (modes[i]->w == width && modes[i]->h == height)
 				foundRes = 1;
+		}
+
+		if (modes == (SDL_Rect **)-1) {
+			SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "All modes available");
+			foundRes = 1;
 		}
 	}
 
@@ -61,10 +123,12 @@ int main(int argc, char **argv) {
 		endTest(-1);
 	}
 
-	if ((frameBuffer = SDL_SetVideoMode(width, height, format.BitsPerPixel, flags)) == NULL) {
+	if ((screen = SDL_SetVideoMode(width, height, format.BitsPerPixel, flags)) == NULL) {
 		SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Could not set video mode: %s", SDL_GetError());
 		endTest(-1);
 	}
+
+	//if ((buffer = SDL_CreateRGBSurface(SDL_HWSURFACE, width, height, format)))
 
 	SDL_WM_SetCaption("Test", "Test");
 
@@ -92,7 +156,7 @@ int main(int argc, char **argv) {
 	endTest(0);
 }
 
-int myRand(int max) {
+uint32_t myRand(int max) {
 	srand(SDL_GetTicks());
 	return (rand() % (max + 1));
 }
@@ -106,14 +170,18 @@ void doDraw() {
 	rect.h = myRand(height / 4);
 
 	// I know the colours are wrong here - just testing
-	SDL_Color col;
-	col.r = myRand(255);
-	col.g = myRand(255);
-	col.b = myRand(255);
+	SDL_FillRect(screen, &rect, myRand(0xffffff + 1));
 
-	SDL_FillRect(frameBuffer, &rect, SDL_MapRGB(&format, col.r, col.g, col.b));
+	/*
+	SDL_Rect dest;
+	dest.x = 0;
+	dest.y = 0;
+	dest.w = width;
+	dest.h = height;
+	SDL_BlitSurface(buffer, NULL, screen, &dest);
+	*/
 
-	SDL_Flip(frameBuffer);
+	SDL_Flip(screen);
 
 	// update FPS counter
 	deltaClock = SDL_GetTicks() - startClock;
@@ -127,9 +195,14 @@ void doDraw() {
 }
 
 void endTest(int status) {
-	if (frameBuffer) {
-		SDL_FreeSurface(frameBuffer);
-		frameBuffer = NULL;
+	if (buffer) {
+		SDL_FreeSurface(buffer);
+		buffer = NULL;
+	}
+
+	if (screen) {
+		SDL_FreeSurface(screen);
+		screen = NULL;
 	}
 
 	printf("SDL ENDED\n");
